@@ -8,4 +8,8 @@ import java.time.LocalDateTime;
 public class RedisData {
     private LocalDateTime expireTime;
     private Object data;
+
+    public RedisData(Object data) {
+        this.data = data;
+    }
 }
