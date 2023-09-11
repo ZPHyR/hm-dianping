@@ -1,6 +1,7 @@
 package com.hmdp.service.impl;
 
 import cn.hutool.core.util.BooleanUtil;
+import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.toolkit.StringUtils;
 import com.hmdp.dto.Result;
@@ -8,15 +9,21 @@ import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hmdp.utils.RedisData;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 
+import java.time.LocalDateTime;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.RedisConstants.CACHE_SHOP_KEY;
+import static com.hmdp.utils.RedisConstants.LOCK_SHOP_KEY;
 
 /**
  * <p>
@@ -52,6 +59,12 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         return Result.ok(shop);
     }
 
+    /**
+     * 更新后删除缓存
+     *
+     * @param shop
+     * @return
+     */
     @Override
     @Transactional//事务
     public Result update(Shop shop) {
@@ -118,6 +131,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
      * @return
      */
     public Shop queryWithMutex(Long id) throws InterruptedException {
+
         //1 redis
         String shopJson = stringRedisTemplate.opsForValue().get(CACHE_SHOP_KEY + id);
 
@@ -148,25 +162,93 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
             }
 
-            //2 no, query sql
+            //2 query sql
             shop = getById(id);
 
-            //2.1 no, return false
+            //2.1 no, return false, write redis null
             if (shop == null) {
                 stringRedisTemplate.opsForValue()
                         .set(CACHE_SHOP_KEY + id, "", 2, TimeUnit.MINUTES);
                 return null;
             }
 
-            //3 write redis
+            //3 yes, write redis
             stringRedisTemplate.opsForValue()
                     .set(CACHE_SHOP_KEY + id, JSONUtil.toJsonStr(shop), 30, TimeUnit.MINUTES);
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         } finally {
+            //4 unlock
             unLock(lockKey);
         }
         //4 return
+        return shop;
+    }
+
+    /**
+     * 逻辑过期时间方式防止缓存击穿的存redis方法
+     * 过期了起线程去更新，然后拿旧的先用着
+     *
+     * @param id
+     * @param expireSeconds
+     */
+    public void saveShop2Redis(Long id, Long expireSeconds) {
+        //1 get shop
+        Shop shop = getById(id);
+
+        //2 set data
+        RedisData redisData = new RedisData(shop);
+        redisData.setExpireTime(LocalDateTime.now().plusSeconds(expireSeconds));
+
+        //3 write redis
+        stringRedisTemplate.opsForValue().set(CACHE_SHOP_KEY + id, JSONUtil.toJsonStr(redisData));
+    }
+
+    //缓存重建线程池
+    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+
+    /**
+     * 逻辑过期防止缓存击穿
+     *
+     * @param id
+     * @return
+     */
+    public Shop queryWithLogicExpire(Long id) throws InterruptedException {
+        Shop shop = null;
+        //1 redis
+        String shopJson = stringRedisTemplate.opsForValue().get(CACHE_SHOP_KEY + id);
+
+        //1.1 no, return
+        if (StringUtils.isBlank(shopJson)) {
+            return null;
+        }
+
+        //1.2 yes, json to Shop
+        RedisData redisData = JSONUtil.toBean(shopJson, RedisData.class);
+        JSONObject data = (JSONObject) redisData.getData();
+        shop = JSONUtil.toBean(data, Shop.class);
+
+        //2 if expired
+        LocalDateTime expireTime = redisData.getExpireTime();
+
+        //2.1 not expired
+        if (expireTime.isAfter(LocalDateTime.now())) {
+            return shop;
+        }
+
+        //2.2 expired
+        String lockKey = LOCK_SHOP_KEY + id;
+        boolean notLocked = tryLock(lockKey);
+        if (notLocked) {
+            //3 thread to query and write redis
+            CACHE_REBUILD_EXECUTOR.submit(() -> {
+                try {
+                    this.saveShop2Redis(id, 30L);
+                } finally {
+                    unLock(lockKey);
+                }
+            });
+        }
         return shop;
     }
 }
