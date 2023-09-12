@@ -9,6 +9,7 @@ import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisData;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -22,8 +23,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static com.hmdp.utils.RedisConstants.CACHE_SHOP_KEY;
-import static com.hmdp.utils.RedisConstants.LOCK_SHOP_KEY;
+import static com.hmdp.utils.RedisConstants.*;
 
 /**
  * <p>
@@ -39,6 +39,9 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Resource
     StringRedisTemplate stringRedisTemplate;
 
+    @Resource
+    CacheClient cacheClient;
+
     private boolean tryLock(String lock) {
         Boolean mutexLock = stringRedisTemplate.opsForValue()
                 .setIfAbsent(lock, "1", 1, TimeUnit.MINUTES);
@@ -51,8 +54,16 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Override
     public Object queryById(Long id) throws InterruptedException {
+        //穿透
 //        Shop shop = queryWithPassThrough(id);
-        Shop shop = queryWithMutex(id);
+        //击穿
+//        Shop shop = queryWithMutex(id);
+        //穿透
+//        Shop shop = cacheClient.queryWithPassThrough(
+//                CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        //击穿
+        Shop shop = cacheClient.queryWithLogicExpire(
+                CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
         if (shop == null) {
             return Result.fail("wrong id");
         }
@@ -98,7 +109,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
         /**
          *防止缓存穿透，第一次查sql后在redis存了空缓存，此时要拦截查询sql
-         * shopJson不为blank，不为null，是“”，为空缓存
+         * shopJson为blank，不为null，是“”，为空缓存
          *
          * 为null表示什么都没有，之前也没查过，去查询sql
          */
@@ -146,7 +157,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
         /**
          *防止缓存穿透，第一次查sql后在redis存了空缓存，此时要拦截查询sql
-         * shopJson不为blank，不为null，是“”，为空缓存
+         * shopJson为blank，不为null，是“”，为空缓存
          *
          * 为null表示什么都没有，之前也没查过，去查询sql
          */
