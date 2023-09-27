@@ -5,19 +5,24 @@ import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hmdp.dto.Result;
+import com.hmdp.dto.ScrollResult;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.Blog;
+import com.hmdp.entity.Follow;
 import com.hmdp.entity.User;
 import com.hmdp.mapper.BlogMapper;
 import com.hmdp.service.IBlogService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hmdp.service.IFollowService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
@@ -38,6 +43,9 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
 
     @Resource
     StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    IFollowService followService;
 
     @Override
     public Result queryBlogById(Long id) {
@@ -124,6 +132,64 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 .collect(Collectors.toList());
         return Result.ok(userDTOS);
 
+    }
+
+    //推模式Feed流
+    @Override
+    public Result saveBlog(Blog blog) {
+        UserDTO user = UserHolder.getUser();
+        blog.setUserId(user.getId());
+
+        save(blog);
+        //select all fans
+        List<Follow> follows = followService.query()
+                .eq("follow_user_id", user.getId()).list();
+        for (Follow f : follows) {
+            Long id = f.getId();
+            String key = "feed:" + id;
+            stringRedisTemplate.opsForZSet()
+                    .add(key, blog.getId().toString(), System.currentTimeMillis());
+        }
+        return Result.ok(blog);
+    }
+
+    @Override
+    public Result queryBlogOfFollow(Long max, Integer offset) {
+        UserDTO user = UserHolder.getUser();
+        Long id = user.getId();
+        String key = "feed:" + id;
+        Set<ZSetOperations.TypedTuple<String>> typedTuples = stringRedisTemplate.opsForZSet()
+                .reverseRangeByScoreWithScores(key, 0, max, offset, 2);
+        if (typedTuples == null || typedTuples.isEmpty()) {
+            return Result.ok();
+        }
+        List<Long> ids = new ArrayList<>(typedTuples.size());
+        long minTime = 0;
+        int os = 1;
+        for (ZSetOperations.TypedTuple<String> tuple : typedTuples) {
+            ids.add(Long.valueOf(tuple.getValue()));
+            long time = tuple.getScore().longValue();
+            if (time == minTime) {
+                os++;
+            } else {
+                os = 1;
+            }
+        }
+        List<Blog> blogs = query()
+                .in("id", ids)
+                .last("ORDER BY FIELD(id," + StrUtil.join(",", ids) + ")").list();
+
+        for (Blog blog : blogs) {
+            queryBlogCreator(blog);
+            isBlogLiked(blog);
+        }
+
+        ScrollResult scrollResult = new ScrollResult();
+        scrollResult.setList(blogs);
+        scrollResult.setOffset(os);
+        scrollResult.setMinTime(minTime);
+
+        return Result.ok(scrollResult);
     }
 
     private void queryBlogCreator(Blog blog) {
