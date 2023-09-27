@@ -2,6 +2,7 @@ package com.hmdp.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.bean.copier.CopyOptions;
+import cn.hutool.core.date.DateTime;
 import cn.hutool.core.lang.UUID;
 import cn.hutool.core.util.RandomUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -12,14 +13,19 @@ import com.hmdp.entity.User;
 import com.hmdp.mapper.UserMapper;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.RegexUtils;
+import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.connection.BitFieldSubCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpSession;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -109,6 +115,57 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         stringRedisTemplate.expire(tokenKey, LOGIN_USER_TTL, TimeUnit.SECONDS);
 
         return Result.ok(token);
+    }
+
+    @Override
+    public Result sign() {
+        //get user
+        Long id = UserHolder.getUser().getId();
+        //get time
+        LocalDateTime now = LocalDateTime.now();
+        int dayOfMonth = now.getDayOfMonth();
+        //get key
+        String keySuffix = now.format(DateTimeFormatter.ofPattern("yyyyMM"));
+        String key = "sign:" + id + ":" + keySuffix;
+        //write redis
+        stringRedisTemplate.opsForValue().setBit(key, dayOfMonth - 1, true);
+
+        return Result.ok();
+    }
+
+    @Override
+    public Result signCount() {
+        //get user
+        Long id = UserHolder.getUser().getId();
+        //get time
+        LocalDateTime now = LocalDateTime.now();
+        int dayOfMonth = now.getDayOfMonth();
+        //get key
+        String keySuffix = now.format(DateTimeFormatter.ofPattern("yyyyMM"));
+        String key = "sign:" + id + ":" + keySuffix;
+
+        List<Long> result = stringRedisTemplate.opsForValue().bitField(key,
+                BitFieldSubCommands.create()
+                        .get(BitFieldSubCommands.BitFieldType.unsigned(dayOfMonth)).valueAt(0));
+
+        if (result == null || result.isEmpty()) {
+            return Result.ok(0);
+        }
+
+        Long num = result.get(0);
+        if (num == null || num == 0) {
+            return Result.ok(0);
+        }
+        int cnt = 0;
+        while (true) {
+            if ((num & 1) == 1) {
+                cnt++;
+                num >>>= 1;
+            } else {
+                break;
+            }
+        }
+        return Result.ok(cnt);
     }
 
     private User createUserWithPhone(String phone) {

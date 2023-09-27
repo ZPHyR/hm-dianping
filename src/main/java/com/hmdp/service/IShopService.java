@@ -17,4 +17,6 @@ public interface IShopService extends IService<Shop> {
     Object queryById(Long id) throws InterruptedException;
 
     Result update(Shop shop);
+
+    Result queryShopByType(Integer typeId, Integer current, Double x, Double y);
 }
